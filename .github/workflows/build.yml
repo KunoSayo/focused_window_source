@@ -30,6 +30,9 @@ jobs:
         with:
           toolchain: nightly
           override: true
+      - name: Install dependencies for Ubuntu
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install pkg-config && sudo apt-get install libglib2.0-dev
       - name: Build
         run: cargo build --release --verbose -Z unstable-options --out-dir artifacts --no-default-features
       - name: Upload artifacts

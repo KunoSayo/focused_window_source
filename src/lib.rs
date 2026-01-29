@@ -8,6 +8,7 @@ use std::mem::zeroed;
 use std::ops::Deref;
 use std::os::raw::c_void;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -46,6 +47,7 @@ pub static mut OBS_MODULE_INFO: obs_module_info = obs_module_info {
 struct FocusedWindowSource {
     scene_name: Arc<Mutex<String>>,
     scene_item_list: Arc<Mutex<Vec<String>>>,
+    enable: Arc<AtomicBool>,
 }
 
 impl FocusedWindowSource {
@@ -53,6 +55,7 @@ impl FocusedWindowSource {
         Ok(Self {
             scene_name: Arc::new(Mutex::new("".to_string())),
             scene_item_list: Arc::new(Mutex::new(Vec::new())),
+            enable: Default::default(),
         })
     }
 
@@ -214,13 +217,23 @@ pub unsafe extern "C" fn get_properties(data: *mut c_void) -> *mut obs_propertie
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn activate(_data: *mut c_void) {
-    // 空实现
+pub unsafe extern "C" fn activate(data: *mut c_void) {
+    if !data.is_null() {
+        unsafe {
+            let instance = &mut *(data as *mut FocusedWindowSource);
+            instance.enable.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn deactivate(_data: *mut c_void) {
-    // 空实现
+pub unsafe extern "C" fn deactivate(data: *mut c_void) {
+    if !data.is_null() {
+        unsafe {
+            let instance = &mut *(data as *mut FocusedWindowSource);
+            instance.enable.store(false, Ordering::Relaxed);
+        }
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -229,6 +242,9 @@ pub unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
         unsafe {
             // 在这里可以添加每帧的逻辑
             let instance = &mut *(data as *mut FocusedWindowSource);
+            if !instance.enable.load(Ordering::Relaxed) {
+                return;
+            }
             let scene_list = instance.scene_item_list.lock().unwrap();
 
             let mut first_scene = std::ptr::null_mut();

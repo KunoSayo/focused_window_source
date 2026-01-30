@@ -12,6 +12,7 @@ use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
+use crate::active_window_manager::update_active;
 
 // 模块指针
 #[unsafe(no_mangle)]
@@ -333,14 +334,16 @@ pub unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
             if !instance.enable.load(Ordering::Relaxed) {
                 return;
             }
+            update_active();
             let scene_list = instance.scene_item_list.lock().unwrap();
 
             let mut first_scene = std::ptr::null_mut();
             let mut focused_scene = std::ptr::null_mut();
             let mut first_one = c_int::MIN;
             // 渲染场景源
-            if let Ok(focused) = active_window_manager::ACTIVE_WINDOW.read() {
-                if let Some(focused) = focused.deref() {
+            if let Ok(guard) = active_window_manager::ACTIVE_WINDOW.read() {
+                if let Some(focused) = guard.deref().clone() {
+                    drop(guard);
                     for scene_name in scene_list.iter() {
                         let scene = instance.get_scene_item(scene_name);
                         let source = obs_sceneitem_get_source(scene);

@@ -8,20 +8,9 @@ crate-type = ["cdylib"]
 
 [dependencies]
 libobs = "5.0.1"
-libobs-simple = "8.0.1"
-libobs-simple-macro = "7.0.0"
-libobs-wrapper = "9.0.4"
 libc = "0.2"
-log = "0.4.20"
 active-win-pos-rs = "0.9.0"
-windows = "0.48.0"
-object = "0.38.1"
 anyhow = "1.0.100"
-env_logger = "0.11.8"
-once_cell = "1.21.3"
-
-[build-dependencies]
-cc = "1.0.92"
 
 [profile.release]
 lto = true

@@ -21,7 +21,7 @@ pub fn run_thread() {
                     }
                 }
                 if RUNNING.load(Ordering::Acquire) {
-                    std::thread::park_timeout(Duration::from_secs_f32(0.125));
+                    std::thread::park_timeout(Duration::from_secs_f32(1.0));
                 }
             }
         });
@@ -30,11 +30,14 @@ pub fn run_thread() {
     }
 }
 
-pub fn stop_thread() {
-    RUNNING.store(false, Ordering::Release);
+pub fn update_active() {
     if let Ok(thread) = RUNNING_THREAD.lock() {
         if let Some(thread) = thread.deref() {
             thread.unpark();
         }
     }
+}
+pub fn stop_thread() {
+    RUNNING.store(false, Ordering::Release);
+    update_active();
 }

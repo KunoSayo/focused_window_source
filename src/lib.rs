@@ -1,9 +1,10 @@
 mod active_window_manager;
 
+use active_win_pos_rs::ActiveWindow;
 use anyhow::Result;
 use libc::c_int;
 use libobs::*;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsStr};
 use std::mem::zeroed;
 use std::ops::Deref;
 use std::os::raw::c_void;
@@ -43,11 +44,30 @@ pub static mut OBS_MODULE_INFO: obs_module_info = obs_module_info {
     ..unsafe { zeroed() }
 };
 
+// 定义匹配方法枚举
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MatchMethod {
+    Title,       // 只匹配标题
+    Application, // 只匹配应用程序类型
+    Strict,      // 严格匹配：应用程序类型+标题
+}
+
+impl MatchMethod {
+    fn from_str(s: &str) -> Self {
+        match s {
+            "application" => MatchMethod::Application,
+            "strict" => MatchMethod::Strict,
+            _ => MatchMethod::Title,
+        }
+    }
+}
+
 // 定义Focused Window Source结构体
 struct FocusedWindowSource {
     scene_name: Arc<Mutex<String>>,
     scene_item_list: Arc<Mutex<Vec<String>>>,
     enable: Arc<AtomicBool>,
+    match_method: Arc<Mutex<MatchMethod>>,
 }
 
 impl FocusedWindowSource {
@@ -56,6 +76,7 @@ impl FocusedWindowSource {
             scene_name: Arc::new(Mutex::new("".to_string())),
             scene_item_list: Arc::new(Mutex::new(Vec::new())),
             enable: Default::default(),
+            match_method: Arc::new(Mutex::new(MatchMethod::Title)),
         })
     }
 
@@ -65,7 +86,7 @@ impl FocusedWindowSource {
     }
 
     // 检查窗口标题是否匹配（支持部分匹配）
-    fn is_window_matched(&self, title1: &str, title2: &str) -> bool {
+    fn is_str_matched(&self, title1: &str, title2: &str) -> bool {
         if title1.is_empty() || title2.is_empty() {
             return false;
         }
@@ -84,6 +105,37 @@ impl FocusedWindowSource {
         let clean_title2 = title2.trim_end_matches(" - ").trim_end_matches(" | ");
 
         clean_title1 == clean_title2
+    }
+
+    // 根据选择的匹配方法检查窗口是否匹配
+    fn is_window_matched_with_method(
+        &self,
+        focused_window: &ActiveWindow,
+        source_name: &str,
+    ) -> bool {
+        let match_method = self.match_method.lock().unwrap();
+
+        match *match_method {
+            MatchMethod::Title => self.is_str_matched(&focused_window.title, source_name),
+            MatchMethod::Application => self.is_str_matched(
+                &focused_window
+                    .process_path
+                    .file_name()
+                    .unwrap_or(OsStr::new(""))
+                    .to_string_lossy(),
+                source_name,
+            ),
+            MatchMethod::Strict => {
+                self.is_str_matched(
+                    &focused_window
+                        .process_path
+                        .file_name()
+                        .unwrap_or(OsStr::new(""))
+                        .to_string_lossy(),
+                    source_name,
+                ) && self.is_str_matched(&focused_window.title, source_name)
+            }
+        }
     }
 
     // 根据场景名称查找场景源
@@ -163,6 +215,15 @@ pub unsafe extern "C" fn update(data: *mut c_void, settings: *mut obs_data_t) {
                     CStr::from_ptr(obs_data_get_string(settings, b"scene\0".as_ptr() as _))
                         .to_string_lossy()
                         .to_string();
+
+                // 从设置中获取匹配方法
+                let match_method_str = CStr::from_ptr(obs_data_get_string(
+                    settings,
+                    b"match_method\0".as_ptr() as _,
+                ))
+                .to_string_lossy()
+                .to_string();
+                *instance.match_method.lock().unwrap() = MatchMethod::from_str(&match_method_str);
             }
         }
     }
@@ -207,6 +268,33 @@ pub unsafe extern "C" fn get_properties(data: *mut c_void) -> *mut obs_propertie
                 b"scene\0".as_ptr() as *const i8,
                 b"Scene\0".as_ptr() as *const i8,
                 0, // OBS_TEXT_DEFAULT
+            );
+
+            // 添加匹配方法选项
+            let match_method_list = obs_properties_add_list(
+                props,
+                b"match_method\0".as_ptr() as *const i8,
+                b"Match Method\0".as_ptr() as *const i8,
+                obs_combo_type_OBS_COMBO_TYPE_LIST,
+                obs_combo_format_OBS_COMBO_FORMAT_STRING,
+            );
+
+            obs_property_list_add_string(
+                match_method_list,
+                b"Title\0".as_ptr() as *const i8,
+                b"title\0".as_ptr() as *const i8,
+            );
+
+            obs_property_list_add_string(
+                match_method_list,
+                b"Application\0".as_ptr() as *const i8,
+                b"application\0".as_ptr() as *const i8,
+            );
+
+            obs_property_list_add_string(
+                match_method_list,
+                b"Strict (App + Title)\0".as_ptr() as *const i8,
+                b"strict\0".as_ptr() as *const i8,
             );
 
             props
@@ -266,7 +354,7 @@ pub unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
                             let name =
                                 obs_data_get_string(settings, b"window\0".as_ptr() as *const i8);
                             let that_title = CStr::from_ptr(name).to_string_lossy().to_string();
-                            if instance.is_window_matched(&focused.title, &that_title) {
+                            if instance.is_window_matched_with_method(&focused, &that_title) {
                                 focused_scene = scene;
                             }
                         }

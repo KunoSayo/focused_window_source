@@ -1,5 +1,6 @@
 mod active_window_manager;
 
+use crate::active_window_manager::update_active;
 use active_win_pos_rs::ActiveWindow;
 use anyhow::Result;
 use libc::c_int;
@@ -8,15 +9,18 @@ use std::ffi::{CStr, CString, OsStr};
 use std::mem::zeroed;
 use std::ops::Deref;
 use std::os::raw::c_void;
+use std::ptr::null_mut;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use crate::active_window_manager::update_active;
+
+// 全局任务队列
+static TICK_TASKS: Mutex<Vec<FocusedWindowSource>> = Mutex::new(Vec::new());
 
 // 模块指针
 #[unsafe(no_mangle)]
-static mut OBS_MODULE_POINTER: *mut obs_module_info = std::ptr::null_mut();
+static mut OBS_MODULE_POINTER: *mut obs_module_info = null_mut();
 
 // 设置模块指针
 #[unsafe(no_mangle)]
@@ -64,6 +68,7 @@ impl MatchMethod {
 }
 
 // 定义Focused Window Source结构体
+#[derive(Clone)]
 struct FocusedWindowSource {
     scene_name: Arc<Mutex<String>>,
     scene_item_list: Arc<Mutex<Vec<String>>>,
@@ -146,17 +151,17 @@ impl FocusedWindowSource {
 
             let c_str = match CString::from_str(self.scene_name.lock().unwrap().as_str()) {
                 Ok(x) => x,
-                Err(_) => return std::ptr::null_mut(),
+                Err(_) => return null_mut(),
             };
             // 先通过名字查找 source
             let scene_source = obs_get_source_by_name(c_str.as_ptr());
             if scene_source.is_null() {
-                return std::ptr::null_mut();
+                return null_mut();
             }
 
             if !obs_source_is_scene(scene_source) {
                 obs_source_release(scene_source);
-                return std::ptr::null_mut();
+                return null_mut();
             }
 
             // 转换成 obs_scene_t
@@ -191,7 +196,7 @@ pub unsafe extern "C" fn create(
         }
         ret
     } else {
-        std::ptr::null_mut()
+        null_mut()
     }
 }
 
@@ -231,9 +236,7 @@ pub unsafe extern "C" fn update(data: *mut c_void, settings: *mut obs_data_t) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn video_render(data: *mut c_void, _effect: *mut gs_effect_t) {
-    if !data.is_null() {}
-}
+pub unsafe extern "C" fn video_render(_data: *mut c_void, _effect: *mut gs_effect_t) {}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_width(_data: *mut c_void) -> u32 {
@@ -260,8 +263,8 @@ pub unsafe extern "C" fn get_properties(data: *mut c_void) -> *mut obs_propertie
                 b"items\0".as_ptr() as *const i8,
                 b"Items\0".as_ptr() as *const i8,
                 obs_editable_list_type_OBS_EDITABLE_LIST_TYPE_STRINGS,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                null_mut(),
+                null_mut(),
             );
 
             obs_properties_add_text(
@@ -301,7 +304,7 @@ pub unsafe extern "C" fn get_properties(data: *mut c_void) -> *mut obs_propertie
             props
         }
     } else {
-        std::ptr::null_mut()
+        null_mut()
     }
 }
 
@@ -325,50 +328,84 @@ pub unsafe extern "C" fn deactivate(data: *mut c_void) {
     }
 }
 
+// 执行主线程中的任务
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
-    if !data.is_null() {
-        unsafe {
-            // 在这里可以添加每帧的逻辑
-            let instance = &mut *(data as *mut FocusedWindowSource);
-            if !instance.enable.load(Ordering::Relaxed) {
-                return;
-            }
-            update_active();
-            let scene_list = instance.scene_item_list.lock().unwrap();
+unsafe extern "C" fn execute_tick_tasks(_: *mut c_void) {
+    if let Ok(mut tasks_guard) = TICK_TASKS.try_lock() {
+        // 获取所有待执行的任务
+        let tasks = &mut *tasks_guard;
 
-            let mut first_scene = std::ptr::null_mut();
-            let mut focused_scene = std::ptr::null_mut();
-            let mut first_one = c_int::MIN;
-            // 渲染场景源
-            if let Ok(guard) = active_window_manager::ACTIVE_WINDOW.read() {
-                if let Some(focused) = guard.deref().clone() {
-                    drop(guard);
+        if let Ok(guard) = active_window_manager::ACTIVE_WINDOW.read() {
+            if let Some(focused) = guard.deref().clone() {
+                drop(guard);
+                // 为每个任务执行逻辑
+                for instance in tasks.iter() {
+                    let scene_list = instance.scene_item_list.lock().unwrap();
+
+                    let mut first_scene = null_mut();
+                    let mut focused_scene = null_mut();
+                    let mut first_one = c_int::MIN;
+
                     for scene_name in scene_list.iter() {
                         let scene = instance.get_scene_item(scene_name);
-                        let source = obs_sceneitem_get_source(scene);
-                        if !scene.is_null() && !source.is_null() {
-                            let order = obs_sceneitem_get_order_position(scene);
-                            if order >= first_one {
-                                first_one = order;
-                                first_scene = scene;
+                        if !scene.is_null() {
+                            let source = unsafe { obs_sceneitem_get_source(scene) };
+                            if !source.is_null() {
+                                let order = unsafe { obs_sceneitem_get_order_position(scene) };
+                                if order >= first_one {
+                                    first_one = order;
+                                    first_scene = scene;
+                                }
+                                let settings = unsafe { obs_source_get_settings(source) };
+                                let name = unsafe {
+                                    obs_data_get_string(settings, b"window\0".as_ptr() as *const i8)
+                                };
+                                let that_title =
+                                    unsafe { CStr::from_ptr(name).to_string_lossy().to_string() };
+                                if instance.is_window_matched_with_method(&focused, &that_title) {
+                                    focused_scene = scene;
+                                }
                             }
-                            let settings = obs_source_get_settings(source);
-                            let name =
-                                obs_data_get_string(settings, b"window\0".as_ptr() as *const i8);
-                            let that_title = CStr::from_ptr(name).to_string_lossy().to_string();
-                            if instance.is_window_matched_with_method(&focused, &that_title) {
-                                focused_scene = scene;
-                            }
+                        }
+                    }
+
+                    if focused_scene != first_scene
+                        && !focused_scene.is_null()
+                        && !first_scene.is_null()
+                    {
+                        let focused_order =
+                            unsafe { obs_sceneitem_get_order_position(focused_scene) };
+                        unsafe {
+                            obs_sceneitem_set_order_position(focused_scene, first_one);
+                            obs_sceneitem_set_order_position(first_scene, focused_order);
                         }
                     }
                 }
             }
-            if focused_scene != first_scene && !focused_scene.is_null() && !first_scene.is_null() {
-                let focused_order = obs_sceneitem_get_order_position(focused_scene);
-                obs_sceneitem_set_order_position(focused_scene, first_one);
-                obs_sceneitem_set_order_position(first_scene, focused_order);
+        }
+        tasks.clear();
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn video_tick(data: *mut c_void, _seconds: f32) {
+    if !data.is_null() {
+        unsafe {
+            let instance = &*(data as *const FocusedWindowSource);
+            if !instance.enable.load(Ordering::Relaxed) {
+                return;
             }
+
+            // 更新活动窗口
+            update_active();
+            let mut tasks = TICK_TASKS.lock().unwrap();
+            tasks.push(instance.clone());
+            obs_queue_task(
+                obs_task_type_OBS_TASK_UI,
+                Some(execute_tick_tasks),
+                null_mut(),
+                false,
+            );
         }
     }
 }

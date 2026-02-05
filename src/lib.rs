@@ -149,7 +149,7 @@ impl FocusedWindowSource {
         unsafe {
             // 使用 OBS API 查找场景
 
-            let c_str = match CString::from_str(self.scene_name.lock().unwrap().as_str()) {
+            let c_str = match CString::new(self.scene_name.lock().unwrap().as_str()) {
                 Ok(x) => x,
                 Err(_) => return null_mut(),
             };
@@ -167,8 +167,17 @@ impl FocusedWindowSource {
             // 转换成 obs_scene_t
             let scene = obs_scene_from_source(scene_source);
 
+            // 将 scene_item_name 转换为 CString，确保有 null 终止符
+            let item_c_str = match CString::new(scene_item_name) {
+                Ok(x) => x,
+                Err(_) => {
+                    obs_source_release(scene_source);
+                    return null_mut();
+                }
+            };
+
             // 注意：scene_source 引用计数要释放
-            let scene_item = obs_scene_find_source(scene, scene_item_name.as_ptr() as *const i8);
+            let scene_item = obs_scene_find_source(scene, item_c_str.as_ptr() as *const i8);
             obs_source_release(scene_source);
 
             scene_item

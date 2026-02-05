@@ -10,7 +10,6 @@ use std::mem::zeroed;
 use std::ops::Deref;
 use std::os::raw::c_void;
 use std::ptr::null_mut;
-use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
